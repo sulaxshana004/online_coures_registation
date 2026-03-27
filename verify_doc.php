@@ -8,4 +8,3 @@ if(isset($_GET['id'])){
     audit_log($conn,'Admin',$_SESSION['admin_id'],$_SESSION['admin'],'VERIFY_DOC','Student',$id,"Admin verified document for {$stu['Stu_Name']}");
 }
 header("Location: students.php"); exit();
-{}
