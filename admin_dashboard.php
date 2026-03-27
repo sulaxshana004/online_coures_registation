@@ -1,463 +1,410 @@
 <?php
-session_start(); include("config/db.php"); include("config/layout.php");
-if(!isset($_SESSION['admin'])){header("Location: index.php");exit();}
-$ay = get_active_year($conn);
-$yid = $ay['Year_ID'];
+/* ================================================================
+   SLGTI Online Course System — Admin Dashboard (Redesigned)
+   Summary Cards | Charts | Filters | Student Table
+   CSS: config/style.css (common) + css/dashboard.css (page-only)
+   ================================================================ */
+session_start();
+include("config/db.php");
+include("config/layout.php");
+if (!isset($_SESSION['admin'])) { header("Location: index.php"); exit(); }
+
+$ay       = get_active_year($conn);
 $admin_nm = $_SESSION['admin'];
-$admin_char = strtoupper(substr($admin_nm,0,1));
+$admin_ch = strtoupper(substr($admin_nm, 0, 1));
 
+/* ── SUMMARY COUNTS ─────────────────────────────────────────── */
 $total_students  = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM students"))['c'];
-$total_pending_students = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM students WHERE Account_Status='Pending'"))['c'];
+$male_students   = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM students WHERE Stu_Gender='Male'"))['c'];
+$female_students = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM students WHERE Stu_Gender='Female'"))['c'];
 $total_courses   = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM courses WHERE Is_Active=1"))['c'];
-$total_pending   = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM registrations WHERE status='Pending'"))['c'];
-$total_approved  = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM registrations WHERE status='Approved'"))['c'];
-$total_waitlist  = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM registrations WHERE status='Waitlisted'"))['c'];
-$total_doc_rev   = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM registrations WHERE status='Doc_Review'"))['c'];
-$total_rejected  = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM registrations WHERE status='Rejected'"))['c'];
 
-$dept_stats = mysqli_query($conn,"SELECT d.Dept_Name,d.Dept_Icon,d.Dept_Color,
-    (SELECT COUNT(*) FROM courses WHERE Dept_ID=d.Dept_ID AND Is_Active=1) AS cou_count,
-    (SELECT COUNT(*) FROM registrations r JOIN courses c ON r.Cou_ID=c.Cou_ID WHERE c.Dept_ID=d.Dept_ID AND r.status NOT IN('Rejected','Withdrawn')) AS reg_count
-    FROM departments d ORDER BY d.Dept_Name");
+/* ── GENDER DISTRIBUTION ────────────────────────────────────── */
+$gender_data = [];
+$gq = mysqli_query($conn,"SELECT Stu_Gender, COUNT(*) c FROM students GROUP BY Stu_Gender ORDER BY c DESC");
+while ($row = mysqli_fetch_assoc($gq)) $gender_data[] = $row;
 
-$recent_regs = mysqli_query($conn,"SELECT r.App_ID,r.status,r.registered_at,s.Stu_Name,s.NVQ_Level,c.Cou_Name,d.Dept_Name,d.Dept_Icon,r.Reg_ID
-    FROM registrations r
-    JOIN students s ON r.Stu_ID=s.Stu_ID
-    JOIN courses c ON r.Cou_ID=c.Cou_ID
-    LEFT JOIN departments d ON c.Dept_ID=d.Dept_ID
-    ORDER BY r.registered_at DESC LIMIT 8");
+/* ── COURSE-WISE REGISTRATIONS ──────────────────────────────── */
+$course_data = [];
+$cq = mysqli_query($conn,"SELECT c.Cou_Name, COUNT(r.Reg_ID) cnt FROM courses c LEFT JOIN registrations r ON r.Cou_ID=c.Cou_ID AND r.status NOT IN('Rejected','Withdrawn') WHERE c.Is_Active=1 GROUP BY c.Cou_ID,c.Cou_Name ORDER BY cnt DESC LIMIT 8");
+while ($row = mysqli_fetch_assoc($cq)) $course_data[] = $row;
 
-$recent_audit = mysqli_query($conn,"SELECT Actor_Name,Actor_Type,Action,Details,logged_at FROM audit_log ORDER BY logged_at DESC LIMIT 7");
+/* ── DISTRICT-WISE (from Stu_Address) ───────────────────────── */
+$srilanka_districts = ['Ampara','Anuradhapura','Badulla','Batticaloa','Colombo','Galle','Gampaha','Hambantota','Jaffna','Kalutara','Kandy','Kegalle','Kilinochchi','Kurunegala','Mannar','Matale','Matara','Monaragala','Mullaitivu','Nuwara Eliya','Polonnaruwa','Puttalam','Ratnapura','Trincomalee','Vavuniya'];
+$district_data = [];
+foreach ($srilanka_districts as $dist) {
+    $esc = mysqli_real_escape_string($conn,$dist);
+    $cnt = mysqli_fetch_assoc(mysqli_query($conn,"SELECT COUNT(*) c FROM students WHERE Stu_Address LIKE '%$esc%'"))['c'];
+    if ($cnt > 0) $district_data[] = ['district'=>$dist,'count'=>(int)$cnt];
+}
+usort($district_data, fn($a,$b) => $b['count']-$a['count']);
+$district_data = array_slice($district_data,0,10);
 
-page_head('Admin Dashboard');
+/* ── DROPDOWN VALUES ────────────────────────────────────────── */
+$courses_list = mysqli_query($conn,"SELECT Cou_ID,Cou_Name FROM courses WHERE Is_Active=1 ORDER BY Cou_Name");
+
+/* ── FILTER PARAMS ──────────────────────────────────────────── */
+$f_gender    = isset($_GET['gender'])    ? trim($_GET['gender'])    : '';
+$f_district  = isset($_GET['district'])  ? trim($_GET['district'])  : '';
+$f_course    = isset($_GET['course'])    ? (int)$_GET['course']     : 0;
+$f_date_from = isset($_GET['date_from']) ? trim($_GET['date_from']) : '';
+$f_date_to   = isset($_GET['date_to'])   ? trim($_GET['date_to'])   : '';
+$f_search    = isset($_GET['search'])    ? trim($_GET['search'])    : '';
+
+/* ── STUDENT TABLE QUERY ────────────────────────────────────── */
+$where = "WHERE 1=1";
+if ($f_gender   && in_array($f_gender,['Male','Female','Other']))
+    $where .= " AND s.Stu_Gender='".mysqli_real_escape_string($conn,$f_gender)."'";
+if ($f_district)
+    $where .= " AND s.Stu_Address LIKE '%".mysqli_real_escape_string($conn,$f_district)."%'";
+if ($f_course)
+    $where .= " AND r.Cou_ID=$f_course";
+if ($f_date_from)
+    $where .= " AND DATE(r.registered_at)>='".mysqli_real_escape_string($conn,$f_date_from)."'";
+if ($f_date_to)
+    $where .= " AND DATE(r.registered_at)<='".mysqli_real_escape_string($conn,$f_date_to)."'";
+if ($f_search) {
+    $s = mysqli_real_escape_string($conn,$f_search);
+    $where .= " AND (s.Stu_Name LIKE '%$s%' OR s.Stu_Email LIKE '%$s%' OR s.Stu_NIC LIKE '%$s%')";
+}
+$student_rows = mysqli_query($conn,"SELECT s.Stu_ID,s.Stu_Name,s.Stu_Gender,s.Stu_Address,c.Cou_Name,r.registered_at,r.status FROM students s LEFT JOIN registrations r ON r.Stu_ID=s.Stu_ID LEFT JOIN courses c ON c.Cou_ID=r.Cou_ID $where ORDER BY r.registered_at DESC,s.Stu_Name ASC LIMIT 200");
+$row_count = mysqli_num_rows($student_rows);
+
+/* ── JSON FOR CHARTS ────────────────────────────────────────── */
+$j_gender   = json_encode($gender_data);
+$j_course   = json_encode($course_data);
+$j_district = json_encode($district_data);
 ?>
-<style>
-/* ══ COUNTER ANIMATION ══ */
-.kpi-val{font-family:"Space Grotesk",sans-serif;font-size:32px;font-weight:700;line-height:1;}
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Dashboard — SLGTI Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="config/style.css">
+<link rel="stylesheet" href="css/dashboard.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body class="dash-body">
 
-/* ══ KPI GRID ══ */
-.kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:28px;}
-.kpi{
-  background:var(--white);border-radius:20px;border:1px solid var(--border);
-  padding:26px 24px;position:relative;overflow:hidden;
-  transition:all 0.3s cubic-bezier(0.34,1.56,0.64,1);
-  cursor:default;box-shadow:var(--shadow);
-}
-.kpi:hover{transform:translateY(-6px) scale(1.02);box-shadow:0 20px 50px rgba(9,4,70,0.15);}
-.kpi-bg{
-  position:absolute;right:-30px;top:-30px;
-  width:120px;height:120px;border-radius:50%;
-  transition:all 0.3s;
-}
-.kpi:hover .kpi-bg{transform:scale(1.4);}
-.kpi-icon{
-  width:52px;height:52px;border-radius:16px;
-  display:flex;align-items:center;justify-content:center;
-  font-size:24px;margin-bottom:18px;position:relative;z-index:1;transition:all 0.3s;
-}
-.kpi:hover .kpi-icon{transform:scale(1.1) rotate(5deg);}
-.kpi-val{position:relative;z-index:1;margin-bottom:6px;font-size:36px;}
-.kpi-lbl{font-size:13px;color:var(--muted);font-weight:500;position:relative;z-index:1;}
-.kpi-bar{height:4px;border-radius:2px;margin-top:16px;background:#e2e8f0;overflow:hidden;position:relative;z-index:1;}
-.kpi-bar-fill{height:100%;border-radius:2px;transition:width 1.4s cubic-bezier(0.34,1.56,0.64,1);}
-
-/* KPI color variants */
-.kpi-blue .kpi-bg{background:rgba(37,99,235,.07);}
-.kpi-blue .kpi-icon{background:#eff6ff;}
-.kpi-blue .kpi-val{color:#1d4ed8;}
-.kpi-blue .kpi-bar-fill{background:linear-gradient(90deg,#3b82f6,#0ea5e9);}
-.kpi-green .kpi-bg{background:rgba(5,150,105,.07);}
-.kpi-green .kpi-icon{background:#f0fdf4;}
-.kpi-green .kpi-val{color:#065f46;}
-.kpi-green .kpi-bar-fill{background:linear-gradient(90deg,#10b981,#34d399);}
-.kpi-amber .kpi-bg{background:rgba(217,119,6,.07);}
-.kpi-amber .kpi-icon{background:#fffbeb;}
-.kpi-amber .kpi-val{color:#92400e;}
-.kpi-amber .kpi-bar-fill{background:linear-gradient(90deg,#f59e0b,#fbbf24);}
-.kpi-purple .kpi-bg{background:rgba(124,58,237,.07);}
-.kpi-purple .kpi-icon{background:#faf5ff;}
-.kpi-purple .kpi-val{color:#5b21b6;}
-.kpi-purple .kpi-bar-fill{background:linear-gradient(90deg,#7c3aed,#a78bfa);}
-.kpi-cyan .kpi-bg{background:rgba(8,145,178,.07);}
-.kpi-cyan .kpi-icon{background:#ecfeff;}
-.kpi-cyan .kpi-val{color:#0e7490;}
-.kpi-cyan .kpi-bar-fill{background:linear-gradient(90deg,#0891b2,#22d3ee);}
-.kpi-red .kpi-bg{background:rgba(220,38,38,.07);}
-.kpi-red .kpi-icon{background:#fff1f2;}
-.kpi-red .kpi-val{color:#991b1b;}
-.kpi-red .kpi-bar-fill{background:linear-gradient(90deg,#dc2626,#f87171);}
-
-/* ══ SECTION TITLE ══ */
-.sec-title{
-  font-family:"Space Grotesk",sans-serif;font-size:15px;font-weight:700;
-  color:var(--navy2);margin-bottom:16px;
-  display:flex;align-items:center;gap:10px;
-}
-.sec-title::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--border),transparent);}
-
-/* ══ DEPT CARDS ══ */
-.dept-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px;}
-.dept-card{
-  background:var(--white);border-radius:18px;border:1px solid var(--border);
-  padding:22px;box-shadow:var(--shadow);
-  transition:all 0.3s cubic-bezier(0.34,1.56,0.64,1);position:relative;overflow:hidden;
-}
-.dept-card:hover{transform:translateY(-5px) scale(1.02);box-shadow:0 15px 40px rgba(9,4,70,0.12);}
-.dept-card::before{content:"";position:absolute;top:0;left:0;right:0;height:4px;border-radius:4px 4px 0 0;}
-.dept-top{display:flex;align-items:center;gap:14px;margin-bottom:16px;}
-.dept-emoji{font-size:32px;line-height:1;transition:all 0.3s;}
-.dept-card:hover .dept-emoji{transform:scale(1.15) rotate(5deg);}
-.dept-info-name{font-family:"Space Grotesk",sans-serif;font-size:14px;font-weight:700;color:var(--navy2);}
-.dept-info-meta{font-size:12px;color:var(--muted);margin-top:2px;}
-.dept-nums{display:flex;gap:14px;margin-bottom:14px;}
-.dept-num{flex:1;background:var(--off);border-radius:12px;padding:12px;text-align:center;transition:all 0.3s;}
-.dept-card:hover .dept-num{background:var(--accent);}
-.dept-num-val{font-family:"Space Grotesk",sans-serif;font-size:20px;font-weight:700;color:var(--navy2);}
-.dept-num-lbl{font-size:11px;color:var(--muted);margin-top:3px;}
-.dept-prog-bar{height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;}
-.dept-prog-fill{height:100%;border-radius:3px;transition:width 1.4s cubic-bezier(0.34,1.56,0.64,1);}
-.dept-pct{font-size:11px;color:var(--muted);margin-top:6px;text-align:right;}
-
-/* ══ QUICK ACTIONS ══ */
-.qa-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px;}
-.qa{
-  background:var(--white);border-radius:18px;border:2px solid var(--border);
-  padding:20px;text-decoration:none;display:flex;flex-direction:column;gap:12px;
-  transition:all 0.3s cubic-bezier(0.34,1.56,0.64,1);position:relative;overflow:hidden;
-}
-.qa::before{
-  content:"";position:absolute;bottom:0;left:0;right:0;height:0;
-  background:linear-gradient(135deg,var(--sb-dark),var(--blue2));
-  transition:all 0.3s;border-radius:0 0 16px 16px;z-index:0;
-}
-.qa:hover{transform:translateY(-4px);border-color:var(--blue2);box-shadow:0 12px 35px rgba(9,4,70,0.15);}
-.qa:hover::before{height:5px;}
-.qa-icon{font-size:28px;position:relative;z-index:1;transition:all 0.3s;}
-.qa:hover .qa-icon{transform:scale(1.1);}
-.qa-title{font-family:"Space Grotesk",sans-serif;font-size:14px;font-weight:700;color:var(--navy2);position:relative;z-index:1;}
-.qa-desc{font-size:12px;color:var(--muted);position:relative;z-index:1;}
-.qa-arrow{font-size:18px;color:var(--blue2);position:relative;z-index:1;transition:all 0.3s;width:fit-content;}
-.qa:hover .qa-arrow{transform:translateX(6px);color:var(--sb-dark);}
-
-/* ══ BOTTOM GRID ══ */
-.bottom-grid{display:grid;grid-template-columns:1fr 360px;gap:20px;}
-
-/* ══ TABLE ══ */
-.dash-table{width:100%;border-collapse:collapse;}
-.dash-table thead th{
-  font-size:10px;font-weight:700;color:var(--muted);
-  text-transform:uppercase;letter-spacing:.1em;
-  padding:10px 16px;text-align:left;
-  border-bottom:2px solid var(--off);
-  background:linear-gradient(180deg,#fafbff,#f4f7ff);
-}
-.dash-table tbody tr{border-bottom:1px solid #f8faff;transition:.15s;}
-.dash-table tbody tr:last-child{border-bottom:none;}
-.dash-table tbody tr:hover{background:#f8fbff;}
-.dash-table td{padding:12px 16px;font-size:13px;vertical-align:middle;}
-.app-id{font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:700;color:var(--navy2);background:var(--off);border:1px solid var(--border);padding:3px 9px;border-radius:7px;white-space:nowrap;}
-.spill{display:inline-flex;align-items:center;padding:3px 10px;border-radius:100px;font-size:11px;font-weight:700;}
-.sp-pending{background:#fef9c3;color:#854d0e;}
-.sp-approved{background:#f0fdf4;color:#15803d;}
-.sp-rejected{background:#fff1f2;color:#be123c;}
-.sp-waitlisted{background:#faf5ff;color:#7e22ce;}
-.sp-doc_review{background:#dbeafe;color:#1d4ed8;}
-.sp-withdrawn{background:#f9fafb;color:#4b5563;}
-
-/* ══ AUDIT FEED ══ */
-.audit-feed{padding:0 4px;}
-.af-item{
-  display:flex;align-items:flex-start;gap:12px;
-  padding:12px 0;border-bottom:1px solid #f4f7ff;
-  animation:fadeSlideIn .4s ease both;
-}
-.af-item:last-child{border-bottom:none;}
-@keyframes fadeSlideIn{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:translateX(0);}}
-.af-icon{
-  width:34px;height:34px;border-radius:10px;flex-shrink:0;
-  display:flex;align-items:center;justify-content:center;font-size:15px;
-}
-.af-icon.admin{background:#eff6ff;}
-.af-icon.student{background:#f0fdf4;}
-.af-icon.system{background:#faf5ff;}
-.af-body{flex:1;}
-.af-action{font-size:12px;font-weight:700;color:var(--navy2);}
-.af-detail{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4;}
-.af-time{font-size:10px;color:var(--muted);white-space:nowrap;font-weight:500;margin-top:2px;}
-.live-dot{
-  display:inline-flex;align-items:center;gap:6px;
-  font-size:11px;font-weight:700;color:#22c55e;
-}
-.live-dot::before{
-  content:"";width:7px;height:7px;border-radius:50%;background:#22c55e;
-  box-shadow:0 0 8px #22c55e;
-  animation:livePulse 1.5s infinite;
-}
-@keyframes livePulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.4);opacity:.5;}}
-
-/* ══ WELCOME BANNER ══ */
-.welcome-bar{
-  background:linear-gradient(135deg,#090446 0%,#0d0659 50%,#11096b 100%);
-  border-radius:22px;padding:28px 36px;margin-bottom:28px;
-  display:flex;align-items:center;justify-content:space-between;
-  position:relative;overflow:hidden;
-  box-shadow:0 12px 40px rgba(9,4,70,0.25);
-  animation:fadeInUp 0.8s cubic-bezier(0.34,1.56,0.64,1) both;
-}
-@keyframes fadeInUp{from{opacity:0;transform:translateY(30px);}to{opacity:1;transform:translateY(0);}}
-.welcome-bar::before{
-  content:"";position:absolute;right:-80px;top:-80px;
-  width:280px;height:280px;
-  background:radial-gradient(circle,rgba(241,222,222,0.2),transparent 70%);
-  border-radius:50%;animation:wbFloat 6s ease-in-out infinite;
-}
-@keyframes wbFloat{0%,100%{transform:translate(0,0);}50%{transform:translate(-20px,10px);}}
-.welcome-bar::after{
-  content:"";position:absolute;left:30%;bottom:-80px;
-  width:200px;height:200px;
-  background:radial-gradient(circle,rgba(255,255,255,0.1),transparent 70%);
-  border-radius:50%;animation:wbFloat 8s ease-in-out infinite reverse;
-}
-.wb-left{position:relative;z-index:1;}
-.wb-tag{
-  display:inline-flex;align-items:center;gap:7px;
-  background:rgba(241,222,222,0.15);border:1px solid rgba(241,222,222,0.25);
-  color:#F1DEDE;padding:5px 12px;border-radius:8px;
-  font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;
-}
-.wb-name{font-family:"Space Grotesk",sans-serif;font-size:24px;font-weight:800;color:#fff;margin-bottom:4px;text-shadow:0 2px 10px rgba(0,0,0,0.3);}
-.wb-sub{font-size:13px;color:#F1DEDE;}
-.wb-right{display:flex;gap:12px;position:relative;z-index:1;}
-.wb-stat{
-  background:rgba(241,222,222,0.1);border:1px solid rgba(241,222,222,0.15);
-  border-radius:14px;padding:14px 20px;text-align:center;min-width:90px;
-}
-.wb-stat-num{font-family:"Space Grotesk",sans-serif;font-size:24px;font-weight:700;color:#fff;}
-.wb-stat-lbl{font-size:10px;color:#F1DEDE;text-transform:uppercase;letter-spacing:1px;margin-top:3px;}
-
-@media(max-width:1200px){.kpi-grid{grid-template-columns:repeat(3,1fr);}.dept-grid{grid-template-columns:repeat(2,1fr);}.qa-grid{grid-template-columns:repeat(2,1fr);}}
-@media(max-width:900px){.bottom-grid{grid-template-columns:1fr;}.kpi-grid{grid-template-columns:repeat(2,1fr);}}
-</style>
-
-<?php sidebar('admin_dashboard.php'); ?>
-<div class="main">
-<?php topbar('📊 Dashboard','Enterprise Overview',$ay['Year_Label']); ?>
-<div class="content">
-
-<!-- WELCOME BANNER -->
-<div class="welcome-bar">
-  <div class="wb-left">
-    <div class="wb-tag">✦ <?php echo date('l, d M Y'); ?></div>
-    <div class="wb-name">Good <?php echo (date('H')<12)?'Morning':(date('H')<17?'Afternoon':'Evening'); ?>, <?php echo htmlspecialchars($admin_nm); ?>! 👋</div>
-    <div class="wb-sub">Academic Year <strong style="color:#93c5fd"><?php echo $ay['Year_Label']; ?></strong> · Here's your system overview</div>
-  </div>
-  <div class="wb-right">
-    <div class="wb-stat"><div class="wb-stat-num" data-target="<?php echo $total_students; ?>">0</div><div class="wb-stat-lbl">Students</div></div>
-    <div class="wb-stat"><div class="wb-stat-num" data-target="<?php echo $total_approved; ?>">0</div><div class="wb-stat-lbl">Enrolled</div></div>
-    <div class="wb-stat"><div class="wb-stat-num" data-target="<?php echo $total_pending; ?>">0</div><div class="wb-stat-lbl">Pending</div></div>
-  </div>
-</div>
-
-<!-- KPI CARDS -->
-<div class="kpi-grid">
-  <?php
-  $kpis=[
-    ['blue','👥','Total Students',$total_students,100],
-    ['amber','⏳','Pending Students',$total_pending_students,50],
-    ['green','✅','Approved',$total_approved,100],
-    ['cyan','📂','Doc Review',$total_doc_rev,30],
-    ['purple','📋','Waitlisted',$total_waitlist,40],
-    ['red','📚','Active Courses',$total_courses,60],
-  ];
-  foreach($kpis as $k):
-    $pct=min(100,$k[3]>0?round($k[3]/$k[4]*100):0);
-  ?>
-  <div class="kpi kpi-<?php echo $k[0]; ?>">
-    <div class="kpi-bg"></div>
-    <div class="kpi-icon"><?php echo $k[1]; ?></div>
-    <div class="kpi-val" data-target="<?php echo $k[3]; ?>">0</div>
-    <div class="kpi-lbl"><?php echo $k[2]; ?></div>
-    <div class="kpi-bar"><div class="kpi-bar-fill" style="width:0%" data-width="<?php echo $pct; ?>%"></div></div>
-  </div>
-  <?php endforeach; ?>
-</div>
-
-<!-- DEPT OVERVIEW -->
-<div class="sec-title">🏫 Department Overview</div>
-<div class="dept-grid">
-<?php
-mysqli_data_seek($dept_stats,0);
-$di=0;
-while($d=mysqli_fetch_assoc($dept_stats)):
-  $pct=$d['cou_count']>0?min(100,round(($d['reg_count']/($d['cou_count']*30))*100)):0;
-  $color=htmlspecialchars($d['Dept_Color']??'#2563eb');
-  $di++;
-?>
-<div class="dept-card" style="--dc:<?php echo $color; ?>" data-delay="<?php echo $di*80; ?>">
-  <div style="position:absolute;top:0;left:0;right:0;height:3px;background:<?php echo $color; ?>;border-radius:3px 3px 0 0;"></div>
-  <div class="dept-top">
-    <div class="dept-emoji"><?php echo $d['Dept_Icon']; ?></div>
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="sb-brand">
+    <div class="sb-logo">🎓</div>
     <div>
-      <div class="dept-info-name"><?php echo htmlspecialchars($d['Dept_Name']); ?></div>
-      <div class="dept-info-meta">Academic <?php echo $ay['Year_Label']; ?></div>
+      <div class="sb-name">SLGTI</div>
+      <div class="sb-sub">Admin Panel</div>
     </div>
   </div>
-  <div class="dept-nums">
-    <div class="dept-num"><div class="dept-num-val"><?php echo $d['cou_count']; ?></div><div class="dept-num-lbl">Courses</div></div>
-    <div class="dept-num"><div class="dept-num-val"><?php echo $d['reg_count']; ?></div><div class="dept-num-lbl">Registrations</div></div>
-  </div>
-  <div class="dept-prog-bar"><div class="dept-prog-fill" data-width="<?php echo $pct; ?>%" style="width:0%;background:<?php echo $color; ?>"></div></div>
-  <div class="dept-pct"><?php echo $pct; ?>% capacity used</div>
-</div>
-<?php endwhile; ?>
-</div>
-
-<!-- QUICK ACTIONS -->
-<div class="sec-title">⚡ Quick Actions</div>
-<div class="qa-grid">
-  <a href="students.php?status=Pending" class="qa">
-    <div class="qa-icon">🎓</div>
-    <div><div class="qa-title">Review New Students</div><div class="qa-desc"><?php echo $total_pending_students; ?> pending approval</div></div>
-    <div class="qa-arrow">→</div>
-  </a>
-  <a href="registrations.php?filter=Pending" class="qa">
-    <div class="qa-icon">�</div>
-    <div><div class="qa-title">Review Applications</div><div class="qa-desc"><?php echo $total_pending; ?> course applications</div></div>
-    <div class="qa-arrow">→</div>
-  </a>
-  <a href="registrations.php?filter=Doc_Review" class="qa">
-    <div class="qa-icon">�</div>
-    <div><div class="qa-title">Verify Documents</div><div class="qa-desc"><?php echo $total_doc_rev; ?> awaiting check</div></div>
-    <div class="qa-arrow">→</div>
-  </a>
-  <a href="reports.php" class="qa">
-    <div class="qa-icon">📊</div>
-    <div><div class="qa-title">Enrollment Report</div><div class="qa-desc">Full statistics &amp; export</div></div>
-    <div class="qa-arrow">→</div>
-  </a>
-</div>
-
-<!-- BOTTOM GRID -->
-<div class="bottom-grid">
-
-  <!-- RECENT REGISTRATIONS -->
-  <div class="card">
-    <div class="card-head">
-      <h3>📋 Recent Applications</h3>
-      <a href="registrations.php" style="font-size:12px;color:var(--blue2);text-decoration:none;font-weight:600;display:flex;align-items:center;gap:4px;">View All <span style="transition:.2s" id="vaArrow">→</span></a>
+  <nav class="sb-nav">
+    <div class="sb-section">Main</div>
+    <a href="admin_dashboard.php" class="active"><span class="nav-icon">📊</span> Dashboard</a>
+    <a href="students.php"><span class="nav-icon">👥</span> Students</a>
+    <a href="registrations.php"><span class="nav-icon">📋</span> Registrations</a>
+    <a href="courses.php"><span class="nav-icon">📚</span> Courses</a>
+    <div class="sb-section">Management</div>
+    <a href="departments.php"><span class="nav-icon">🏛️</span> Departments</a>
+    <a href="academic_years.php"><span class="nav-icon">📅</span> Academic Years</a>
+    <a href="reports.php"><span class="nav-icon">📈</span> Reports</a>
+    <a href="audit_log.php"><span class="nav-icon">🔍</span> Audit Log</a>
+    <a href="settings.php"><span class="nav-icon">⚙️</span> Settings</a>
+  </nav>
+  <div class="sb-footer">
+    <div class="sb-admin">
+      <div class="sb-av"><?= $admin_ch ?></div>
+      <div>
+        <div class="sb-an"><?= htmlspecialchars($admin_nm) ?></div>
+        <div class="sb-ar">Administrator</div>
+      </div>
     </div>
-    <div class="tbl-wrap">
-      <table class="dash-table">
-        <thead><tr><th>App ID</th><th>Student</th><th>Course</th><th>NVQ</th><th>Status</th><th>Date</th><th></th></tr></thead>
-        <tbody>
-        <?php while($r=mysqli_fetch_assoc($recent_regs)):
-          $sc='sp-'.strtolower($r['status']);
-        ?>
-        <tr>
-          <td><span class="app-id"><?php echo htmlspecialchars($r['App_ID']); ?></span></td>
-          <td style="font-weight:700;font-size:13px"><?php echo htmlspecialchars($r['Stu_Name']); ?></td>
-          <td style="font-size:12px;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><?php echo htmlspecialchars($r['Cou_Name']); ?></td>
-          <td><span class="spill <?php echo $r['NVQ_Level']=='5'?'sp-approved':'sp-pending'; ?>">L<?php echo $r['NVQ_Level']; ?></span></td>
-          <td><span class="spill <?php echo $sc; ?>"><?php echo str_replace('_',' ',$r['status']); ?></span></td>
-          <td style="font-size:11px;color:var(--muted);white-space:nowrap"><?php echo date('d M',strtotime($r['registered_at'])); ?></td>
-          <td><a href="registrations.php?review=<?php echo $r['Reg_ID']; ?>" class="btn btn-sm btn-outline">Review</a></td>
-        </tr>
-        <?php endwhile; ?>
+    <a href="admin_logout.php" class="sb-logout">🚪 Logout</a>
+  </div>
+</aside>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <div class="tb-left">
+    <h1>📊 Dashboard</h1>
+    <p>Student &amp; Course Analytics Overview</p>
+  </div>
+  <div class="tb-right">
+    <span class="year-badge">📅 <?= htmlspecialchars($ay['Year_Name'] ?? 'AY') ?></span>
+    <span class="date-pill" id="topbar-date"></span>
+    <button class="dm-toggle" onclick="toggleDark()" title="Toggle dark mode" aria-label="Toggle dark mode">
+      <span class="dm-icon-moon">🌙</span>
+      <span class="dm-icon-sun">☀️</span>
+    </button>
+  </div>
+</div>
+
+<!-- MAIN -->
+<main class="main">
+<div class="dash-content">
+
+  <!-- SUMMARY CARDS -->
+  <div class="sum-grid">
+    <div class="sum-card sum-blue">
+      <div class="sum-card-stripe"></div>
+      <div class="sum-top"><div class="sum-icon">👥</div><span class="sum-badge">Total</span></div>
+      <div class="sum-num" data-count="<?= $total_students ?>">0</div>
+      <div class="sum-lbl">Total Students</div>
+      <div class="sum-sub">All registered students</div>
+    </div>
+    <div class="sum-card sum-teal">
+      <div class="sum-card-stripe"></div>
+      <div class="sum-top"><div class="sum-icon">👨</div><span class="sum-badge">Male</span></div>
+      <div class="sum-num" data-count="<?= $male_students ?>">0</div>
+      <div class="sum-lbl">Male Students</div>
+      <div class="sum-sub"><?= $total_students>0?round($male_students/$total_students*100):0 ?>% of total</div>
+    </div>
+    <div class="sum-card sum-rose">
+      <div class="sum-card-stripe"></div>
+      <div class="sum-top"><div class="sum-icon">👩</div><span class="sum-badge">Female</span></div>
+      <div class="sum-num" data-count="<?= $female_students ?>">0</div>
+      <div class="sum-lbl">Female Students</div>
+      <div class="sum-sub"><?= $total_students>0?round($female_students/$total_students*100):0 ?>% of total</div>
+    </div>
+    <div class="sum-card sum-violet">
+      <div class="sum-card-stripe"></div>
+      <div class="sum-top"><div class="sum-icon">📚</div><span class="sum-badge">Active</span></div>
+      <div class="sum-num" data-count="<?= $total_courses ?>">0</div>
+      <div class="sum-lbl">Total Courses</div>
+      <div class="sum-sub">Currently active courses</div>
+    </div>
+  </div>
+
+  <!-- FILTER BAR -->
+  <form method="GET" action="admin_dashboard.php" id="filter-form">
+    <div class="filter-bar">
+      <div class="filter-label">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z"/></svg>
+        Filters
+      </div>
+      <div class="filter-group">
+        <select name="district" class="filter-select" onchange="this.form.submit()" aria-label="Filter by District">
+          <option value="">🗺️ All Districts</option>
+          <?php foreach ($srilanka_districts as $d): ?>
+          <option value="<?= htmlspecialchars($d) ?>" <?= $f_district===$d?'selected':'' ?>><?= htmlspecialchars($d) ?></option>
+          <?php endforeach; ?>
+        </select>
+        <select name="gender" class="filter-select" onchange="this.form.submit()" aria-label="Filter by Gender">
+          <option value="">⚥ All Genders</option>
+          <option value="Male"   <?= $f_gender==='Male'?'selected':''   ?>>👨 Male</option>
+          <option value="Female" <?= $f_gender==='Female'?'selected':'' ?>>👩 Female</option>
+          <option value="Other"  <?= $f_gender==='Other'?'selected':''  ?>>🧑 Other</option>
+        </select>
+        <select name="course" class="filter-select" onchange="this.form.submit()" aria-label="Filter by Course">
+          <option value="">📚 All Courses</option>
+          <?php mysqli_data_seek($courses_list,0); while($c=mysqli_fetch_assoc($courses_list)): ?>
+          <option value="<?= $c['Cou_ID'] ?>" <?= $f_course==$c['Cou_ID']?'selected':'' ?>><?= htmlspecialchars($c['Cou_Name']) ?></option>
+          <?php endwhile; ?>
+        </select>
+        <input type="date" name="date_from" class="filter-date" value="<?= htmlspecialchars($f_date_from) ?>" onchange="this.form.submit()" aria-label="From date">
+        <input type="date" name="date_to"   class="filter-date" value="<?= htmlspecialchars($f_date_to) ?>"   onchange="this.form.submit()" aria-label="To date">
+        <input type="text" name="search" class="filter-input" value="<?= htmlspecialchars($f_search) ?>" placeholder="🔍 Search name / NIC / email…" onkeydown="if(event.key==='Enter')this.form.submit()" aria-label="Search">
+        <?php if($f_gender||$f_district||$f_course||$f_date_from||$f_date_to||$f_search): ?>
+        <a href="admin_dashboard.php" class="filter-reset">✕ Reset</a>
+        <?php endif; ?>
+      </div>
+    </div>
+  </form>
+
+  <!-- CHARTS -->
+  <div class="sec-hdr">
+    <div class="sec-hdr-title">📈 Analytics Overview</div>
+    <div class="sec-hdr-line"></div>
+  </div>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title"><span class="chart-title-dot" style="background:#3b82f6"></span>District-wise Student Count</div>
+        <div class="chart-sub">By address keyword match</div>
+      </div>
+      <div class="chart-body"><canvas id="districtChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title"><span class="chart-title-dot" style="background:#e11d48"></span>Gender Split</div>
+        <div class="chart-sub">All registered students</div>
+      </div>
+      <div class="chart-body">
+        <div class="doughnut-wrap">
+          <canvas id="genderChart"></canvas>
+          <div class="doughnut-center">
+            <div class="doughnut-center-num"><?= $total_students ?></div>
+            <div class="doughnut-center-lbl">Students</div>
+          </div>
+        </div>
+      </div>
+      <div class="chart-legend" id="gender-legend"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title"><span class="chart-title-dot" style="background:#7c3aed"></span>Course Registrations</div>
+        <div class="chart-sub">Active courses (top 8)</div>
+      </div>
+      <div class="chart-body"><canvas id="courseChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- STUDENT TABLE -->
+  <div class="sec-hdr">
+    <div class="sec-hdr-title">📋 Student Registration Details</div>
+    <div class="sec-hdr-line"></div>
+  </div>
+  <div class="table-card">
+    <div class="table-head-bar">
+      <div class="table-head-left">
+        <div class="table-head-title">
+          👥 Students
+          <span class="table-count" id="visible-count"><?= $row_count ?></span>
+        </div>
+        <?php if($f_gender||$f_district||$f_course): ?>
+        <span style="font-size:11px;color:var(--dash-muted);">Filtered<?= $f_gender?' · '.$f_gender:'' ?><?= $f_district?' · '.$f_district:'' ?></span>
+        <?php endif; ?>
+      </div>
+      <div class="table-search-wrap">
+        <span class="table-search-icon">🔍</span>
+        <input type="text" class="table-search" id="live-search" placeholder="Quick search…" value="<?= htmlspecialchars($f_search) ?>" aria-label="Live search">
+      </div>
+    </div>
+    <div class="tbl-scroll">
+      <table class="dash-table" id="stu-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Student Name</th>
+            <th>Gender</th>
+            <th>District</th>
+            <th>Course</th>
+            <th>Reg. Date</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="stu-tbody">
+<?php if($row_count===0): ?>
+          <tr><td colspan="7"><div class="tbl-empty"><div class="tbl-empty-icon">🔍</div><div class="tbl-empty-text">No students found</div><div class="tbl-empty-sub">Try adjusting the filters above</div></div></td></tr>
+<?php else: $i=0; while($row=mysqli_fetch_assoc($student_rows)):
+  $i++;
+  $gender  = htmlspecialchars($row['Stu_Gender']??'Other');
+  $gc      = in_array(strtolower($gender),['male','female']) ? strtolower($gender) : 'other';
+  $initials= strtoupper(substr($row['Stu_Name'],0,1));
+  $addr    = $row['Stu_Address']??'';
+  $found_dist='—';
+  foreach($srilanka_districts as $d){ if(stripos($addr,$d)!==false){$found_dist=$d;break;} }
+  $reg_date= $row['registered_at'] ? date('d M Y',strtotime($row['registered_at'])) : '—';
+  $status  = $row['status']??'—';
+  $sc      = match($status){'Approved'=>'sp-approved','Pending'=>'sp-pending','Rejected'=>'sp-rejected','Waitlisted'=>'sp-waitlisted','Doc_Review'=>'sp-doc_review',default=>'sp-withdrawn'};
+?>
+          <tr>
+            <td><span class="row-num"><?= $i ?></span></td>
+            <td><div class="stu-cell"><div class="stu-avatar <?= $gc ?>"><?= $initials ?></div><span class="stu-name"><?= htmlspecialchars($row['Stu_Name']) ?></span></div></td>
+            <td><span class="g-pill <?= $gc ?>"><?= $gc==='male'?'👨':($gc==='female'?'👩':'🧑') ?> <?= $gender ?></span></td>
+            <td><span class="dist-chip"><?= htmlspecialchars($found_dist) ?></span></td>
+            <td><?php if($row['Cou_Name']): ?><span class="course-tag" title="<?= htmlspecialchars($row['Cou_Name']) ?>"><?= htmlspecialchars($row['Cou_Name']) ?></span><?php else: ?><span class="date-txt">—</span><?php endif; ?></td>
+            <td><span class="date-txt"><?= $reg_date ?></span></td>
+            <td><?php if($status!=='—'): ?><span class="spill <?= $sc ?>"><?= $status ?></span><?php else: ?><span class="date-txt">—</span><?php endif; ?></td>
+          </tr>
+<?php endwhile; endif; ?>
         </tbody>
       </table>
     </div>
-  </div>
-
-  <!-- AUDIT FEED -->
-  <div class="card">
-    <div class="card-head">
-      <h3>🔍 Live Activity</h3>
-      <span class="live-dot">LIVE</span>
-    </div>
-    <div class="card-body audit-feed">
-      <?php
-      $ai=0;
-      while($a=mysqli_fetch_assoc($recent_audit)):
-        $ai++;
-        $ic_cls=strtolower($a['Actor_Type']);
-        $ic=$a['Actor_Type']=='Admin'?'🛡️':($a['Actor_Type']=='Student'?'🎓':'⚙️');
-      ?>
-      <div class="af-item" style="animation-delay:<?php echo $ai*80; ?>ms">
-        <div class="af-icon <?php echo $ic_cls; ?>"><?php echo $ic; ?></div>
-        <div class="af-body">
-          <div class="af-action"><?php echo htmlspecialchars($a['Actor_Name']??'System'); ?> &mdash; <?php echo htmlspecialchars($a['Action']); ?></div>
-          <div class="af-detail"><?php echo htmlspecialchars(substr($a['Details']??'',0,52)); ?></div>
-          <div class="af-time">🕐 <?php echo date('d M · H:i',strtotime($a['logged_at'])); ?></div>
-        </div>
-      </div>
-      <?php endwhile; ?>
-      <a href="audit_log.php" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px;padding:10px;background:var(--off);border-radius:10px;font-size:12px;color:var(--blue2);font-weight:700;text-decoration:none;transition:.2s;" onmouseover="this.style.background='#dbeafe'" onmouseout="this.style.background='var(--off)'">View Full Audit Log →</a>
+    <div class="table-footer">
+      <div>Showing <strong id="showing-count"><?= $row_count ?></strong> of <strong><?= $row_count ?></strong> records<?= ($f_gender||$f_district||$f_course||$f_search)?' (filtered)':'' ?></div>
     </div>
   </div>
 
-</div><!-- /bottom-grid -->
-</div><!-- /content -->
-</div><!-- /main -->
+</div><!-- /dash-content -->
+</main>
 
 <script>
-// ── Animated counters ──────────────────────────────────
-function animateCount(el){
-  var target=parseInt(el.dataset.target)||0;
-  if(target===0){el.textContent='0';return;}
-  var duration=1200,start=null;
-  function step(ts){
-    if(!start)start=ts;
-    var prog=Math.min((ts-start)/duration,1);
-    var ease=1-Math.pow(1-prog,3);
-    el.textContent=Math.round(ease*target);
-    if(prog<1)requestAnimationFrame(step);
-    else el.textContent=target;
-  }
-  requestAnimationFrame(step);
-}
-document.querySelectorAll('[data-target]').forEach(function(el){
-  setTimeout(function(){animateCount(el);},200);
-});
+const genderRaw   = <?= $j_gender ?>;
+const courseRaw   = <?= $j_course ?>;
+const districtRaw = <?= $j_district ?>;
 
-// ── Progress bar animations ────────────────────────────
-setTimeout(function(){
-  document.querySelectorAll('[data-width]').forEach(function(el){
-    el.style.transition='width 1.3s cubic-bezier(.34,1.56,.64,1)';
-    el.style.width=el.dataset.width;
+const BLUE_PALETTE=['#1d4ed8','#2563eb','#3b82f6','#60a5fa','#93c5fd','#bfdbfe','#dbeafe','#e0f2fe','#0ea5e9','#0284c7'];
+const GENDER_COLORS={Male:'#0d9488',Female:'#e11d48',Other:'#7c3aed'};
+
+function isDark(){return document.documentElement.getAttribute('data-theme')==='dark';}
+function gridColor(){return isDark()?'rgba(148,163,184,0.08)':'rgba(100,116,139,0.1)';}
+function textColor(){return isDark()?'#94a3b8':'#64748b';}
+
+function animateCounters(){
+  document.querySelectorAll('.sum-num[data-count]').forEach(el=>{
+    const target=parseInt(el.dataset.count,10),dur=900,start=performance.now();
+    const upd=now=>{const p=Math.min((now-start)/dur,1),e=1-Math.pow(1-p,3);el.textContent=Math.floor(e*target);if(p<1)requestAnimationFrame(upd);};
+    requestAnimationFrame(upd);
   });
-},400);
+}
 
-// ── Dept cards stagger in ──────────────────────────────
-document.querySelectorAll('.dept-card').forEach(function(el){
-  el.style.opacity='0';
-  el.style.transform='translateY(16px)';
-  el.style.transition='opacity .4s ease, transform .4s ease';
-  setTimeout(function(){
-    el.style.opacity='1';
-    el.style.transform='translateY(0)';
-  },parseInt(el.dataset.delay)||200);
-});
+function toggleDark(){
+  const html=document.documentElement;
+  const next=html.getAttribute('data-theme')==='dark'?'light':'dark';
+  html.setAttribute('data-theme',next);
+  localStorage.setItem('slgti_theme',next);
+  updateChartThemes();
+}
+function loadTheme(){
+  const saved=localStorage.getItem('slgti_theme')||'light';
+  document.documentElement.setAttribute('data-theme',saved);
+}
 
-// ── KPI cards stagger in ───────────────────────────────
-document.querySelectorAll('.kpi').forEach(function(el,i){
-  el.style.opacity='0';
-  el.style.transform='translateY(12px)';
-  el.style.transition='opacity .35s ease, transform .35s ease';
-  setTimeout(function(){
-    el.style.opacity='1';
-    el.style.transform='translateY(0)';
-  },i*70+100);
-});
+const liveSearch=document.getElementById('live-search');
+if(liveSearch){
+  liveSearch.addEventListener('input',function(){
+    const q=this.value.toLowerCase().trim();
+    let visible=0;
+    document.querySelectorAll('#stu-tbody tr').forEach(tr=>{
+      const show=!q||tr.textContent.toLowerCase().includes(q);
+      tr.style.display=show?'':'none';
+      if(show&&tr.cells.length>1)visible++;
+    });
+    const vc=document.getElementById('visible-count'),sc=document.getElementById('showing-count');
+    if(vc)vc.textContent=visible;if(sc)sc.textContent=visible;
+  });
+}
 
-// ── QA cards stagger in ───────────────────────────────
-document.querySelectorAll('.qa').forEach(function(el,i){
-  el.style.opacity='0';
-  el.style.transform='translateY(10px)';
-  el.style.transition='opacity .35s ease, transform .35s ease';
-  setTimeout(function(){
-    el.style.opacity='1';
-    el.style.transform='translateY(0)';
-  },i*80+300);
-});
+(function(){
+  const el=document.getElementById('topbar-date');
+  if(!el)return;
+  el.textContent=new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+})();
+
+let districtChart,genderChart,courseChart;
+function buildCharts(){
+  const bf={family:"'Plus Jakarta Sans',sans-serif",size:11};
+
+  const dCtx=document.getElementById('districtChart');
+  if(dCtx&&districtRaw.length>0){
+    districtChart=new Chart(dCtx,{type:'bar',data:{labels:districtRaw.map(d=>d.district),datasets:[{label:'Students',data:districtRaw.map(d=>d.count),backgroundColor:BLUE_PALETTE.slice(0,districtRaw.length),borderRadius:6,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false},tooltip:{callbacks:{title:i=>i[0].label+' District',label:i=>' '+i.raw+' students'}}},scales:{x:{ticks:{color:textColor(),font:bf},grid:{display:false},border:{display:false}},y:{ticks:{color:textColor(),font:bf,stepSize:1},grid:{color:gridColor()},border:{display:false}}}}});
+  } else if(dCtx){dCtx.parentElement.innerHTML='<div class="tbl-empty"><div class="tbl-empty-icon">🗺️</div><div class="tbl-empty-text">No district data yet</div></div>';}
+
+  const gCtx=document.getElementById('genderChart');
+  if(gCtx&&genderRaw.length>0){
+    const gColors=genderRaw.map(g=>GENDER_COLORS[g.Stu_Gender]||'#94a3b8');
+    genderChart=new Chart(gCtx,{type:'doughnut',data:{labels:genderRaw.map(g=>g.Stu_Gender),datasets:[{data:genderRaw.map(g=>g.c),backgroundColor:gColors,borderWidth:3,borderColor:isDark()?'#161b25':'#ffffff',hoverOffset:6}]},options:{responsive:true,cutout:'68%',plugins:{legend:{display:false},tooltip:{callbacks:{label:item=>' '+item.raw+' students ('+Math.round(item.raw/genderRaw.reduce((a,g)=>a+parseInt(g.c),0)*100)+'%)'}}}}});
+    const total=genderRaw.reduce((a,g)=>a+parseInt(g.c),0);
+    const leg=document.getElementById('gender-legend');
+    if(leg)leg.innerHTML=genderRaw.map((g,i)=>`<div class="legend-item"><span class="legend-dot" style="background:${gColors[i]}"></span><span>${g.Stu_Gender}</span><span class="legend-val">${g.c}</span><span class="legend-pct">${total>0?Math.round(g.c/total*100):0}%</span></div>`).join('');
+  }
+
+  const cCtx=document.getElementById('courseChart');
+  if(cCtx&&courseRaw.length>0){
+    courseChart=new Chart(cCtx,{type:'bar',data:{labels:courseRaw.map(c=>c.Cou_Name.length>22?c.Cou_Name.substring(0,20)+'…':c.Cou_Name),datasets:[{label:'Registrations',data:courseRaw.map(c=>c.cnt),backgroundColor:'rgba(124,58,237,0.15)',borderColor:'#7c3aed',borderWidth:2,borderRadius:6,borderSkipped:false}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false},tooltip:{callbacks:{label:item=>' '+item.raw+' registrations'}}},scales:{x:{ticks:{color:textColor(),font:bf,stepSize:1},grid:{color:gridColor()},border:{display:false}},y:{ticks:{color:textColor(),font:bf},grid:{display:false},border:{display:false}}}}});
+  } else if(cCtx){cCtx.parentElement.innerHTML='<div class="tbl-empty"><div class="tbl-empty-icon">📚</div><div class="tbl-empty-text">No course data yet</div></div>';}
+}
+
+function updateChartThemes(){
+  [districtChart,genderChart,courseChart].forEach(ch=>{
+    if(!ch)return;
+    if(ch.options.scales)Object.values(ch.options.scales).forEach(sc=>{if(sc.ticks)sc.ticks.color=textColor();if(sc.grid&&sc.grid.color!==undefined)sc.grid.color=gridColor();});
+    if(ch.config.type==='doughnut')ch.data.datasets[0].borderColor=isDark()?'#161b25':'#ffffff';
+    ch.update('none');
+  });
+}
+
+document.addEventListener('DOMContentLoaded',()=>{loadTheme();animateCounters();buildCharts();});
 </script>
-</body></html>
+</body>
+</html>
